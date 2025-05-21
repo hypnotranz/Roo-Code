@@ -31,6 +31,10 @@ export const generateSystemPrompt = async (provider: ClineProvider, message: Web
 
 	const rooIgnoreInstructions = provider.getCurrentCline()?.rooIgnoreController?.getInstructions()
 
+	const currentCline = provider.getCurrentCline();
+	const initialUserPrompt = currentCline?.initialUserPrompt;
+	const currentCodeDump = currentCline?.currentCodeDump;
+
 	// Determine if browser tools can be used based on model support, mode, and user settings
 	let modelSupportsComputerUse = false
 
@@ -67,6 +71,8 @@ export const generateSystemPrompt = async (provider: ClineProvider, message: Web
 		enableMcpServerCreation,
 		language,
 		rooIgnoreInstructions,
+		initialUserPrompt, // new
+		currentCodeDump    // new
 	)
 
 	return systemPrompt

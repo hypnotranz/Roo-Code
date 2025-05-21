@@ -44,6 +44,8 @@ async function generatePrompt(
 	enableMcpServerCreation?: boolean,
 	language?: string,
 	rooIgnoreInstructions?: string,
+	initialUserPrompt?: string,
+	currentCodeDump?: string,
 ): Promise<string> {
 	if (!context) {
 		throw new Error("Extension context is required for generating system prompt")
@@ -92,7 +94,25 @@ ${getRulesSection(cwd, supportsComputerUse, effectiveDiffStrategy)}
 
 ${getSystemInfoSection(cwd)}
 
-${getObjectiveSection()}
+${getObjectiveSection()}` // End of existing standard sections before custom instructions
+
+	// Add new sections here
+	if (initialUserPrompt) {
+		basePrompt += `
+
+INITIAL TASK:
+${initialUserPrompt}`
+	}
+
+	if (currentCodeDump) {
+		basePrompt += `
+
+MOST RECENT CODE:
+(This code is up-to-date reflecting all changes made up to your last response.)
+${currentCodeDump}`
+	}
+
+	basePrompt += `
 
 ${await addCustomInstructions(promptComponent?.customInstructions || modeConfig.customInstructions || "", globalCustomInstructions || "", cwd, mode, { language: language ?? formatLanguage(vscode.env.language), rooIgnoreInstructions })}`
 
@@ -115,6 +135,8 @@ export const SYSTEM_PROMPT = async (
 	enableMcpServerCreation?: boolean,
 	language?: string,
 	rooIgnoreInstructions?: string,
+	initialUserPrompt?: string,
+	currentCodeDump?: string,
 ): Promise<string> => {
 	if (!context) {
 		throw new Error("Extension context is required for generating system prompt")
@@ -146,7 +168,7 @@ export const SYSTEM_PROMPT = async (
 	// If a file-based custom system prompt exists, use it
 	if (fileCustomSystemPrompt) {
 		const roleDefinition = promptComponent?.roleDefinition || currentMode.roleDefinition
-		const customInstructions = await addCustomInstructions(
+		const customInstructionsContent = await addCustomInstructions( // Renamed for clarity
 			promptComponent?.customInstructions || currentMode.customInstructions || "",
 			globalCustomInstructions || "",
 			cwd,
@@ -154,12 +176,29 @@ export const SYSTEM_PROMPT = async (
 			{ language: language ?? formatLanguage(vscode.env.language), rooIgnoreInstructions },
 		)
 
-		// For file-based prompts, don't include the tool sections
-		return `${roleDefinition}
+		let fullPrompt = `${roleDefinition}
 
-${fileCustomSystemPrompt}
+${fileCustomSystemPrompt}`
 
-${customInstructions}`
+		if (initialUserPrompt) {
+			fullPrompt += `
+
+INITIAL TASK:
+${initialUserPrompt}`
+		}
+
+		if (currentCodeDump) {
+			fullPrompt += `
+
+MOST RECENT CODE:
+(This code is up-to-date reflecting all changes made up to your last response.)
+${currentCodeDump}`
+		}
+
+		fullPrompt += `
+
+${customInstructionsContent}`
+		return fullPrompt
 	}
 
 	// If diff is disabled, don't pass the diffStrategy
@@ -181,5 +220,7 @@ ${customInstructions}`
 		enableMcpServerCreation,
 		language,
 		rooIgnoreInstructions,
+		initialUserPrompt, // new
+		currentCodeDump, // new
 	)
 }

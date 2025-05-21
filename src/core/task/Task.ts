@@ -1,3 +1,4 @@
+import * as fs from "fs/promises"; // Or 'fs' if not using promises consistently
 import * as path from "path"
 import os from "os"
 import crypto from "crypto"
@@ -112,6 +113,9 @@ export type TaskOptions = {
 }
 
 export class Task extends EventEmitter<ClineEvents> {
+	public initialUserPrompt: string = "";
+	public currentCodeDump: string = "";
+
 	readonly taskId: string
 	readonly instanceId: string
 
@@ -248,6 +252,17 @@ export class Task extends EventEmitter<ClineEvents> {
 
 		this.diffStrategy = new MultiSearchReplaceDiffStrategy(this.fuzzyMatchThreshold)
 		this.toolRepetitionDetector = new ToolRepetitionDetector(this.consecutiveMistakeLimit)
+
+		if (!historyItem && task) {
+			this.initialUserPrompt = task;
+		} else if (historyItem && historyItem.task) {
+			// If resuming from history, try to find the first user message.
+			// This assumes historyItem.task might hold the initial prompt or
+			// that clineMessages from history would contain it.
+			// For simplicity, we'll use historyItem.task if available,
+			// otherwise it might need more sophisticated logic to find the true "initial" prompt from saved messages.
+			this.initialUserPrompt = historyItem.task;
+		}
 
 		onCreated?.(this)
 
@@ -631,9 +646,11 @@ export class Task extends EventEmitter<ClineEvents> {
 		// messages from previous session).
 		this.clineMessages = []
 		this.apiConversationHistory = []
+		this.initialUserPrompt = task || "";
 		await this.providerRef.deref()?.postStateToWebview()
 
 		await this.say("text", task, images)
+		await this.updateCodeDump();
 		this.isInitialized = true
 
 		let imageBlocks: Anthropic.ImageBlockParam[] = formatResponse.imageBlocks(images)
@@ -711,6 +728,18 @@ export class Task extends EventEmitter<ClineEvents> {
 		// the task first.
 		this.apiConversationHistory = await this.getSavedApiConversationHistory()
 
+		const firstUserMessage = this.clineMessages.find(msg => msg.type === 'say' && msg.say === 'user_feedback');
+		if (firstUserMessage && firstUserMessage.text) {
+			this.initialUserPrompt = firstUserMessage.text;
+		} else if (this.clineMessages.length > 0 && this.clineMessages[0].text) {
+			// Fallback to the text of the very first message if specific user feedback isn't found
+			this.initialUserPrompt = this.clineMessages[0].text;
+		}
+		// Ensure initialUserPrompt is set from historyItem.task if other methods fail
+		if (!this.initialUserPrompt && historyItem?.task) {
+			 this.initialUserPrompt = historyItem.task;
+		}
+
 		const lastClineMessage = this.clineMessages
 			.slice()
 			.reverse()
@@ -723,6 +752,7 @@ export class Task extends EventEmitter<ClineEvents> {
 			askType = "resume_task"
 		}
 
+		await this.updateCodeDump();
 		this.isInitialized = true
 
 		const { response, text, images } = await this.ask(askType) // calls poststatetowebview
@@ -1695,5 +1725,115 @@ export class Task extends EventEmitter<ClineEvents> {
 
 	public get cwd() {
 		return this.workspacePath
+	}
+
+	public async updateCodeDump(): Promise<void> {
+		this.providerRef.deref()?.log(`Task ${this.taskId}.${this.instanceId}: Updating code dump...`);
+		try {
+			const workspacePath = this.workspacePath;
+			if (!workspacePath) {
+				this.providerRef.deref()?.log(`Task ${this.taskId}.${this.instanceId}: No workspace path found, cannot update code dump.`);
+				this.currentCodeDump = "No workspace open or available.";
+				return;
+			}
+
+			// Utilize existing RooIgnoreController to respect .rooignore files
+			const ignoredPatterns = this.rooIgnoreController ? this.rooIgnoreController.getIgnoredPosixPatterns() : [];
+			const ignoreInstance = (await import("ignore")).default; // Dynamically import ignore
+			const ig = ignoreInstance().add(ignoredPatterns);
+
+			// List files using a glob pattern - this needs to be adapted if a direct `ls` or glob utility is available.
+			// For now, assume a placeholder function `this.listFilesRecursively(dir)` exists or needs to be implemented
+			// by calling an appropriate tool or service.
+			// Let's use a simplified approach for now by trying to read a common 'src' directory if it exists,
+			// or falling back to the workspace root, and list top-level files/dirs.
+			// A more robust solution would use `vscode.workspace.findFiles` or a similar API
+			// accessible to the extension environment, which the worker might need to simulate or be provided with.
+
+			// Placeholder for actual file listing logic.
+			// The worker will need to implement this, potentially using `fs.readdir` recursively.
+			// For this subtask, we'll define a structure that the worker can fill.
+			// The actual file listing and reading will be the core of the worker's task here.
+
+			const filesToRead: string[] = [];
+			const sourceCodeExtensions = [".ts", ".js", ".tsx", ".jsx", ".py", ".java", ".cs", ".go", ".rs", ".swift", ".kt", ".php", ".rb", ".pl", ".sh", ".html", ".css", ".scss", ".less", ".vue", ".svelte", ".json", ".yml", ".yaml", ".md"];
+			const excludedDirs = ["node_modules", ".git", ".vscode", "dist", "build", "out", "coverage", "__pycache__"];
+			const maxFileSize = 500 * 1024; // 500KB limit per file
+
+			const listFilesRecursively = async (dir: string): Promise<string[]> => {
+				const dirents = await fs.readdir(dir, { withFileTypes: true });
+				const files = await Promise.all(dirents.map(async (dirent) => {
+					const res = path.resolve(dir, dirent.name);
+					const relativePath = path.relative(workspacePath, res);
+
+					if (excludedDirs.includes(dirent.name.toLowerCase()) || ig.ignores(relativePath)) {
+						return [];
+					}
+					if (dirent.isDirectory()) {
+						return listFilesRecursively(res);
+					} else {
+						const ext = path.extname(dirent.name).toLowerCase();
+						if (sourceCodeExtensions.includes(ext)) {
+							try {
+								const stats = await fs.stat(res);
+								if (stats.size > maxFileSize) {
+									this.providerRef.deref()?.log(`Skipping large file: ${res} (size: ${stats.size})`);
+									return [];
+								}
+							} catch (statError) {
+								this.providerRef.deref()?.log(`Error stating file ${res}: ${statError}`);
+								return [];
+							}
+							return [res];
+						}
+						return [];
+					}
+				}));
+				return Array.prototype.concat(...files);
+			};
+
+			try {
+				const allFiles = await listFilesRecursively(workspacePath);
+				filesToRead.push(...allFiles);
+			} catch (e) {
+				this.providerRef.deref()?.log(`Error listing files for code dump: ${e}`);
+				this.currentCodeDump = "Error: Could not list all project files for context.";
+				return;
+			}
+
+			if (filesToRead.length === 0) {
+				this.currentCodeDump = "No relevant source code files found in the workspace.";
+				this.providerRef.deref()?.log(`Task ${this.taskId}.${this.instanceId}: No relevant files found for code dump.`);
+				return;
+			}
+
+			let dump = "";
+			const maxTotalDumpSize = 2 * 1024 * 1024; // 2MB limit for total dump
+
+			for (const filePath of filesToRead) {
+				const relativePath = path.relative(workspacePath, filePath);
+				if (ig.ignores(relativePath)) {
+					continue;
+				}
+				try {
+					const content = await fs.readFile(filePath, "utf-8");
+					const fileEntry = `--- File: ${relativePath.replace(/\\/g, '/')} ---\n\n${content.trim()}\n\n`;
+					if (dump.length + fileEntry.length > maxTotalDumpSize) {
+						this.providerRef.deref()?.log(`Code dump reached max size (${maxTotalDumpSize} bytes), stopping.`);
+						break;
+					}
+					dump += fileEntry;
+				} catch (error) {
+					this.providerRef.deref()?.log(`Error reading file ${filePath} for code dump: ${error}`);
+					dump += `--- File: ${relativePath.replace(/\\/g, '/')} ---\n\nError reading file: ${error.message}\n\n`;
+				}
+			}
+			this.currentCodeDump = dump.length > 0 ? dump : "No files could be read for the code dump.";
+			this.providerRef.deref()?.log(`Task ${this.taskId}.${this.instanceId}: Code dump updated. Size: ${this.currentCodeDump.length} bytes.`);
+
+		} catch (error) {
+			this.providerRef.deref()?.log(`Task ${this.taskId}.${this.instanceId}: Failed to update code dump: ${error}`);
+			this.currentCodeDump = "Error: Failed to generate code dump.";
+		}
 	}
 }
