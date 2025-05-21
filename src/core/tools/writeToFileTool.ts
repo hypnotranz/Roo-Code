@@ -244,6 +244,7 @@ export async function writeToFileTool(
 			}
 
 			await cline.diffViewProvider.reset()
+			await cline.updateCodeDump()
 
 			return
 		}
